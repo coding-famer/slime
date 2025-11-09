@@ -15,6 +15,7 @@ class Sample:
     prompt: Union[str, list[dict[str, str]]] = ""
     tokens: list[int] = field(default_factory=list)
     pixel_values: Optional[torch.Tensor] = None  # Processed image features for VLM
+    multimodal_input: Optional[list[dict[str, Any]]] = None
     # response
     response: str = ""
     response_length: int = 0

@@ -19,6 +19,7 @@ def pack_sequences(
     max_tokens_per_gpu: int | None = None,
     num_packs: int | None = None,
     pixel_values: list[list[int]] | None = None,
+    image_grid_thw: list[list[int]] | None = None,
 ) -> list[dict]:
     """
     Pack sequences into dense batches with cumulative sequence lengths.
@@ -100,6 +101,10 @@ def pack_sequences(
             pack_pixel_values = [pixel_values[i] for i in indices if pixel_values[i] is not None]
             if pack_pixel_values:
                 packed_batch["pixel_values"] = torch.cat(pack_pixel_values, dim=0)
+        if image_grid_thw is not None:
+            pack_image_grid_thw = [image_grid_thw[i] for i in indices if image_grid_thw[i] is not None]
+            if pack_image_grid_thw:
+                packed_batch["image_grid_thw"] = torch.cat(pack_image_grid_thw, dim=0)
 
         result.append(packed_batch)
 

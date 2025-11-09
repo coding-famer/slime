@@ -25,15 +25,22 @@ from .rm_hub import async_rm, batched_async_rm
 __all__ = ["generate_rollout"]
 
 
-def _load_and_encode_image(path: str) -> str:
+def _load_and_encode_image(img: str | Image.Image) -> str:
     """Load an image from path, ensure RGB, encode as JPEG base64 string."""
-    with Image.open(path) as image:
+    
+    def _encode_pil_image(pil_image: Image.Image) -> str:
+        """Helper to encode PIL image as JPEG base64."""
         buffer = io.BytesIO()
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(buffer, format="JPEG")
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+        pil_image.save(buffer, format="JPEG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
+    
+    if isinstance(img, str):
+        with Image.open(img) as pil_image:
+            return _encode_pil_image(pil_image)
+    else:
+        return _encode_pil_image(img)
 
 class GenerateState(metaclass=SingletonMeta):
     """
@@ -105,27 +112,18 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     # Process prompt to create text and image payload
     image_data = []
     images_for_training = []
-    if isinstance(sample.prompt, str):
-        text_prompt = sample.prompt
-    else:  # Multimodal prompt (list of dicts)
-        text_prompt = ""
-        # sglang uses a placeholder to insert image features
-        image_token = state.tokenizer.special_tokens_map.get("image_token", "<image>")
-        for part in sample.prompt:
-            if part["type"] == "text":
-                text_prompt += part["text"]
-            elif part["type"] == "image":
-                text_prompt += image_token
-                try:
-                    img_b64 = await asyncio.to_thread(_load_and_encode_image, part["path"])
+    if sample.multimodal_input:
+        for multimodal_type, multimodal_paths in sample.multimodal_input.items():
+            if not isinstance(multimodal_paths, list):
+                multimodal_paths = [multimodal_paths]
+            for multimodal_path in multimodal_paths:
+                if multimodal_type == "image":
+                    img_b64 = await asyncio.to_thread(_load_and_encode_image, multimodal_path)
                     image_data.append(img_b64)
-                    # Also load PIL image for training
-                    img_pil = await asyncio.to_thread(lambda: Image.open(part["path"]).convert("RGB"))
+                    # img_pil = await asyncio.to_thread(lambda: Image.open(multimodal_path).convert("RGB"))
+                    img_pil = multimodal_path
                     images_for_training.append(img_pil)
-                except Exception as e:
-                    print(f"Error processing image {part['path']}: {e}")
-                    sample.status = Sample.Status.ABORTED
-                    return sample
+    text_prompt = sample.prompt
 
     if len(sample.response) > 0:
         # Adjust max_new_tokens for subsequent generation turns
@@ -158,8 +156,9 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
             # Process images for training (like tokenization for images)
             if images_for_training and state.processor is not None:
-                processed = state.processor(images=images_for_training, return_tensors="pt")
+                processed = state.processor(text=text_prompt, images=images_for_training, return_tensors="pt")
                 sample.pixel_values = processed["pixel_values"]
+                sample.tokens = processed["input_ids"]
 
     output = await post(url, payload)
 

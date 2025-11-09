@@ -27,6 +27,7 @@ def get_base_gpu_id(args, rank):
 
 
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
+    multiprocessing.set_start_method("spawn", force=True)
     p = multiprocessing.Process(target=launch_server, args=(server_args,))
     p.start()
 

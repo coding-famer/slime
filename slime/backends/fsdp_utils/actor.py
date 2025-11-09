@@ -276,7 +276,9 @@ class FSDPTrainRayActor(TrainRayActor):
                             "attention_mask": None,
                         }
                         if "pixel_values" in batch:
-                            model_args["pixel_values"] = batch["pixel_values"]
+                            model_args["pixel_values"] = batch["pixel_values"].unsqueeze(0)
+                        if "image_grid_thw" in batch:
+                            model_args["image_grid_thw"] = batch["image_grid_thw"].unsqueeze(0)
                         logits = self.model(**model_args).logits
                     batch[f"{store_prefix}log_probs"] = gather_log_probs_packed(
                         logits,
@@ -350,6 +352,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         rollout_data["rollout_log_probs"][start:end] if "rollout_log_probs" in rollout_data else None
                     ),
                     pixel_values=(rollout_data["pixel_values"][start:end] if "pixel_values" in rollout_data else None),
+                    image_grid_thw=(rollout_data["image_grid_thw"][start:end] if "image_grid_thw" in rollout_data else None),
                     num_packs=mbs_size,
                 )
             )
@@ -394,6 +397,14 @@ class FSDPTrainRayActor(TrainRayActor):
         rank = dist.get_rank()
 
         rollout_data = process_rollout_data(self.args, rollout_data_ref, rank, world_size)
+        for multimodal_type in self.args.multimodal_keys.keys():
+            if multimodal_type in rollout_data:
+                # multimodal_inputs = self.vlm_processor.image_processor(images=rollout_data[multimodal_type])
+                # input_ids should also be recomputed here
+                multimodal_inputs = self.vlm_processor(text=rollout_data["prompt"], images=rollout_data[multimodal_type])
+                rollout_data.update(multimodal_inputs)
+                # rollout_data["tokens"] = multimodal_inputs["input_ids"]
+
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             rollout_data["advantages"] = rollout_data["returns"] = [
                 torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
@@ -474,6 +485,8 @@ class FSDPTrainRayActor(TrainRayActor):
                 input_ids=packed_batch["tokens"].unsqueeze(0),
                 attention_mask=None,
                 position_ids=packed_batch["position_ids"].unsqueeze(0),
+                pixel_values=packed_batch["pixel_values"].unsqueeze(0) if "pixel_values" in packed_batch else None,
+                image_grid_thw=packed_batch["image_grid_thw"].unsqueeze(0) if "image_grid_thw" in packed_batch else None,
             ).logits
 
         # Handle packed sequences

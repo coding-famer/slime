@@ -245,6 +245,13 @@ class RolloutManager:
         if samples[0].pixel_values is not None:
             train_data["pixel_values"] = [sample.pixel_values for sample in samples]
 
+        if samples[0].prompt is not None:
+            train_data["prompt"] = [sample.prompt for sample in samples]
+
+        if samples[0].multimodal_input is not None:
+            for multimodal_type in samples[0].multimodal_input.keys():
+                train_data[multimodal_type] = [sample.multimodal_input[multimodal_type] for sample in samples]
+
         return train_data
 
 
