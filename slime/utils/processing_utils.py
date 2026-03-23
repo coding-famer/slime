@@ -2,12 +2,28 @@ import base64
 import io
 import json
 import logging
+import math
+import os
 from pathlib import Path
 
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Video preprocessing constants — aligned with sglang qwen_vl.py defaults.
+# Configurable via environment variables for consistency with sglang server.
+# ---------------------------------------------------------------------------
+IMAGE_FACTOR = 28
+FRAME_FACTOR = 2
+FPS = float(os.environ.get("VIDEO_FPS", 2.0))
+FPS_MIN_FRAMES = int(os.environ.get("VIDEO_MIN_FRAMES", 4))
+FPS_MAX_FRAMES = int(os.environ.get("VIDEO_MAX_FRAMES", 768))
+VIDEO_MIN_PIXELS = int(os.environ.get("VIDEO_MIN_PIXELS", 128 * 28 * 28))
+VIDEO_MAX_PIXELS = int(os.environ.get("VIDEO_MAX_PIXELS_PER_FRAME", 768 * 28 * 28))
+# VIDEO_MAX_PIXELS env var is shared with sglang (controls total pixel budget)
+VIDEO_TOTAL_PIXELS = int(float(os.environ.get("VIDEO_MAX_PIXELS", 128000 * 28 * 28 * 0.9)))
 
 # Default image patch size for vision-language models
 # Note: Qwen3-VL uses 16, Qwen2.5-VL uses 14
@@ -24,6 +40,26 @@ def build_processor_kwargs(multimodal_inputs: dict | None = None) -> dict:
     modality_forced = {"return_tensors": "pt"}
 
     result = dict(multimodal_inputs) if multimodal_inputs else {}
+
+    # Preprocess video paths into tensors aligned with sglang.
+    # sglang hardcodes IMAGE_FACTOR=28 for all models, so we do the same.
+    image_factor = IMAGE_FACTOR
+    if result.get("videos") and any(isinstance(v, str) for v in result["videos"]):
+        videos, metadatas = [], []
+        for v in result["videos"]:
+            if isinstance(v, str):
+                tensor, metadata = preprocess_video(v, image_factor)
+                videos.append(tensor)
+                metadatas.append(metadata)
+            else:
+                videos.append(v)
+        result["videos"] = videos
+        result.setdefault("videos_kwargs", {}).update(
+            {
+                "do_sample_frames": False,
+                "video_metadata": metadatas,
+            }
+        )
 
     # return_tensors=None for text (input_ids as lists), "pt" for modality-specific outputs
     result["text_kwargs"] = {**result.get("text_kwargs", {}), "return_tensors": None}
@@ -139,13 +175,30 @@ def process_vision_info(prompt, processor):
             image_patch_size = processor.image_processor.patch_size
         else:
             image_patch_size = DEFAULT_PATCH_SIZE
-        images, videos = qwen_process_vision_info(prompt, image_patch_size=image_patch_size)
+
+        # Strip video entries from messages so qwen_vl_utils only processes images.
+        # Video paths are extracted separately from dataset columns in data.py.
+        image_only_prompt = _strip_video_from_messages(prompt)
+        images, _ = qwen_process_vision_info(image_only_prompt, image_patch_size=image_patch_size)
     except Exception:
         # Fallback: generic extraction for non-Qwen models
         images = _extract_images_from_messages(prompt) or None
         videos = None
 
     return {"images": images, "videos": videos}
+
+
+def _strip_video_from_messages(messages: list[dict]) -> list[dict]:
+    """Remove video content entries from chat messages, keeping everything else."""
+    result = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            result.append(msg)
+            continue
+        filtered = [item for item in content if item.get("type") != "video"]
+        result.append({**msg, "content": filtered})
+    return result
 
 
 def encode_image_for_rollout_engine(image) -> str:
@@ -156,3 +209,151 @@ def encode_image_for_rollout_engine(image) -> str:
     image.save(buffer, format="PNG")
     image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{image_base64}"
+
+
+def prepare_multimodal_payload(multimodal_inputs: dict | None) -> dict:
+    """Build sglang payload fields (image_data, video_data) from multimodal_inputs."""
+    result = {}
+    if not multimodal_inputs:
+        return result
+    if multimodal_inputs.get("images"):
+        result["image_data"] = [encode_image_for_rollout_engine(img) for img in multimodal_inputs["images"]]
+    if multimodal_inputs.get("videos"):
+        result["video_data"] = [encode_video_for_rollout_engine(v) for v in multimodal_inputs["videos"]]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Video preprocessing — aligned with sglang's preprocess_video in qwen_vl.py
+# ---------------------------------------------------------------------------
+
+
+def round_by_factor(number: int, factor: int) -> int:
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: int, factor: int) -> int:
+    return math.floor(number / factor) * factor
+
+
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int = IMAGE_FACTOR,
+    min_pixels: int | None = None,
+    max_pixels: int | None = None,
+) -> tuple[int, int]:
+    """Resize dimensions to be divisible by *factor* while staying within pixel budget.
+
+    Aligned with sglang ``smart_resize``.
+    """
+    if min_pixels is None:
+        min_pixels = 4 * factor * factor
+    if max_pixels is None:
+        max_pixels = 16384 * factor * factor
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
+
+
+def smart_nframes(total_frames: int, video_fps: float) -> int:
+    """Calculate number of frames to sample — aligned with sglang ``smart_nframes``."""
+    min_frames = ceil_by_factor(FPS_MIN_FRAMES, FRAME_FACTOR)
+    max_frames = floor_by_factor(min(FPS_MAX_FRAMES, total_frames), FRAME_FACTOR)
+    nframes = total_frames / video_fps * FPS
+    if nframes > total_frames:
+        logger.warning(f"smart_nframes: nframes[{nframes}] > total_frames[{total_frames}]")
+    nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
+    nframes = floor_by_factor(nframes, FRAME_FACTOR)
+    if not (FRAME_FACTOR <= nframes <= total_frames):
+        raise ValueError(f"nframes should in interval [{FRAME_FACTOR}, {total_frames}], but got {nframes}.")
+    return nframes
+
+
+def preprocess_video(
+    video_source: str,
+    image_factor: int = IMAGE_FACTOR,
+) -> tuple:
+    """Load and preprocess a video — aligned with sglang ``preprocess_video``.
+
+    Performs frame sampling and BILINEAR resize identical to sglang so that the
+    HF processor (called with ``do_sample_frames=False``) produces the same
+    ``pixel_values_videos`` / ``video_grid_thw`` as sglang's inference path.
+
+    Args:
+        video_source: Local file path to the video.
+        image_factor: Spatial factor for smart_resize (default 28, matching sglang).
+
+    Returns:
+        (video_tensor, video_metadata) where video_tensor is shape (T, C, H, W)
+        uint8 and video_metadata is a dict for the HF processor.
+    """
+    import numpy as np
+    import torch
+    import torchvision.transforms.functional as F
+    from torchvision.transforms import InterpolationMode
+
+    try:
+        import decord
+    except ImportError as err:
+        raise ImportError("decord is required for video preprocessing: pip install decord") from err
+
+    vr = decord.VideoReader(video_source)
+    total_frames, video_fps = len(vr), vr.get_avg_fps()
+
+    nframes = smart_nframes(total_frames, video_fps)
+    idx = np.linspace(0, total_frames - 1, num=nframes, dtype=np.int64)
+    idx = np.unique(idx)  # sglang deduplicates frame indices
+
+    video = torch.from_numpy(vr.get_batch(idx.tolist()).asnumpy())
+    video = video.permute(0, 3, 1, 2)  # THWC → TCHW
+
+    nframes, _, height, width = video.shape
+    max_pixels = max(
+        min(VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR),
+        int(VIDEO_MIN_PIXELS * 1.05),
+    )
+    resized_height, resized_width = smart_resize(
+        height,
+        width,
+        factor=image_factor,
+        min_pixels=VIDEO_MIN_PIXELS,
+        max_pixels=max_pixels,
+    )
+    video = F.resize(video, [resized_height, resized_width], interpolation=InterpolationMode.BILINEAR)
+
+    video_metadata = {
+        "fps": video_fps,
+        "duration": total_frames / video_fps,
+        "total_num_frames": total_frames,
+        "frames_indices": idx.tolist(),
+    }
+    return video, video_metadata
+
+
+def encode_video_for_rollout_engine(video_source: str) -> str:
+    """Read raw video file and base64-encode it for sglang video_data."""
+    if video_source.startswith(("http://", "https://")):
+        import requests
+
+        data = requests.get(video_source).content
+    else:
+        with open(video_source, "rb") as f:
+            data = f.read()
+    return base64.b64encode(data).decode("utf-8")

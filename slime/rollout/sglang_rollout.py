@@ -22,9 +22,9 @@ from slime.utils.http_utils import get, post
 from slime.utils.misc import SingletonMeta, load_function
 from slime.utils.processing_utils import (
     build_processor_kwargs,
-    encode_image_for_rollout_engine,
     load_processor,
     load_tokenizer,
+    prepare_multimodal_payload,
 )
 from slime.utils.types import Sample
 
@@ -148,10 +148,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 
-    has_multimodal = sample.multimodal_inputs and sample.multimodal_inputs.get("images")
+    has_multimodal = sample.multimodal_inputs and (
+        sample.multimodal_inputs.get("images") or sample.multimodal_inputs.get("videos")
+    )
     if has_multimodal:
-        image_data = sample.multimodal_inputs["images"]
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
+        payload.update(prepare_multimodal_payload(sample.multimodal_inputs))
 
     # Use existing tokens for multi-turn or tokenize the new prompt
     if len(sample.response) > 0:

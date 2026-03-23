@@ -247,6 +247,12 @@ class Dataset:
             else:
                 multimodal_inputs = None
 
+            # Extract video paths from dataset columns (videos are not loaded at init time)
+            if multimodal_keys and multimodal_inputs is not None:
+                video_key = multimodal_keys.get("video")
+                if video_key and data.get(video_key) is not None:
+                    multimodal_inputs["videos"] = list(data[video_key])
+
             origin_samples.append(
                 Sample(
                     prompt=output_prompt,
