@@ -5,6 +5,7 @@ import socket
 from argparse import Namespace
 from contextlib import nullcontext
 
+import numpy as np
 import ray
 import torch
 import torch.distributed as dist
@@ -51,12 +52,12 @@ class MegatronTrainRayActor(TrainRayActor):
         with_ref: bool = False,
         with_opd_teacher: bool = False,
     ) -> int | None:
-        monkey_patch_torch_dist()
-
-        super().init(args, role, with_ref, with_opd_teacher)
-
         if args.debug_rollout_only:
+            self.args = args
             return 0
+
+        monkey_patch_torch_dist()
+        super().init(args, role, with_ref, with_opd_teacher)
 
         init(args)
 
@@ -92,12 +93,12 @@ class MegatronTrainRayActor(TrainRayActor):
             args, role
         )
 
+        start_rollout_id = loaded_rollout_id + 1
+
         if role == "critic":
             if self.args.offload_train:
                 self.sleep()
-            return
-
-        start_rollout_id = loaded_rollout_id + 1
+            return start_rollout_id
 
         self.weights_backuper = TensorBackuper.create(
             source_getter=lambda: named_params_and_buffers(
@@ -126,7 +127,10 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.weights_backuper.backup("rollout_actor")
 
         if self.args.vocab_size is None:
-            self.args.vocab_size = self.tokenizer.vocab_size
+            # Prefer HF config vocab_size (which may include model-native padding)
+            # over tokenizer vocab_size (which may be smaller, e.g. GPT-OSS).
+            hf_vocab = getattr(self.hf_config, "vocab_size", None)
+            self.args.vocab_size = hf_vocab if hf_vocab is not None else self.tokenizer.vocab_size
 
         update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
         self.weight_updater = update_weight_cls(
@@ -201,7 +205,14 @@ class MegatronTrainRayActor(TrainRayActor):
             # Move multimodal training tensors to GPU in advance
             rollout_data["multimodal_train_inputs"] = [
                 (
-                    {key: tensor.to(device=torch.cuda.current_device()) for key, tensor in mm_dict.items()}
+                    {
+                        key: (
+                            torch.from_numpy(v.copy()).to(device=torch.cuda.current_device())
+                            if isinstance(v, np.ndarray)
+                            else v.to(device=torch.cuda.current_device())
+                        )
+                        for key, v in mm_dict.items()
+                    }
                     if mm_dict is not None
                     else None
                 )
@@ -358,7 +369,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with timer("data_preprocess"):
             rollout_data = self._get_rollout_data(rollout_data_ref)
-            log_rollout_data(rollout_id, self.args, rollout_data)
 
         if self.role == "critic":
             return self.train_critic(rollout_id, rollout_data)
@@ -378,7 +388,7 @@ class MegatronTrainRayActor(TrainRayActor):
             )
         )
 
-        if rollout_id >= self.args.num_critic_only_steps:
+        if rollout_id >= self.args.num_critic_only_steps and not self.args.critic_train_only:
             sync_actor_critic_data(self.args, rollout_data, self._actor_critic_groups)
 
         compute_advantages_and_returns(self.args, rollout_data)
@@ -536,21 +546,26 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.use_fault_tolerance:
             if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.recover_rollout_engines.remote())
+                ray.get(self.rollout_manager.recover_updatable_engines.remote())
             dist.barrier(group=get_gloo_group())
 
-        rollout_engines, rollout_engine_lock, num_new_engines = ray.get(
-            self.rollout_manager.get_rollout_engines_and_lock.remote()
+        rollout_engines, rollout_engine_lock, num_new_engines, engine_gpu_counts, engine_gpu_offsets = ray.get(
+            self.rollout_manager.get_updatable_engines_and_lock.remote()
         )
 
         if self.args.offload_train:
             reload_process_groups()
 
         if num_new_engines > 0:
-            self.weight_updater.connect_rollout_engines(rollout_engines, rollout_engine_lock)
+            self.weight_updater.connect_rollout_engines(
+                rollout_engines,
+                rollout_engine_lock,
+                engine_gpu_counts=engine_gpu_counts,
+                engine_gpu_offsets=engine_gpu_offsets,
+            )
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.clear_num_new_engines.remote())
+                ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")

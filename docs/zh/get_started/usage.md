@@ -37,8 +37,7 @@
 
 slime 支持多种训练后端，可以通过 `--train-backend` 参数进行选择：
 
-- `megatron`（默认）：使用 Megatron-LM 作为训练后端，支持大规模模型的高效训练；
-- `fsdp`（实验性）：使用 PyTorch FSDP 作为训练后端，可以直接加载 HuggingFace 格式权重，无需转换。
+- `megatron`（默认）：使用 Megatron-LM 作为训练后端，支持大规模模型的高效训练。
 
 ### 加载 megatron
 
@@ -194,7 +193,6 @@ sglang 的加载非常简单，只需要：
   注意：在策略蒸馏 (OPD) 现在与 advantage estimator 正交，使用 `--use-opd` 和 `--opd-kl-coef` 可以在任意 estimator 之上启用 OPD。
 - `--calculate-per-token-loss`：slime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
 - `--use-tis`：如果需要开启 tis（https://fengyao.notion.site/off-policy-rl），可以开启这一设置；
-- `--true-on-policy-mode`：开启 True On-Policy 模式，即在训练过程中严格保证数据是当前策略生成的。
 
 #### GRPO 算法
 
@@ -367,6 +365,36 @@ slime 会用 [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl
 所有的 sglang server 在启动后，会通过 `/add_worker` 申请加入 router。在实际进行数据生成的时候，只需要向 router 发送 http 请求，router 会进行 load balancing 操作，将请求转发给 server 们。
 
 当通过 `--sglang-router-ip` 与 `--sglang-router-port` 来配置传入一个外部的 router，此时 slime 不再会在内部启动一个 router，而是会把所有的 server 都注册在这个外部 router 上。这时可以利用这个外部的 router 地址来实现更复杂的数据生成流程。注意 router 是支持 openai compatible api 的。
+
+### 高级引擎配置（--sglang-config）
+
+对于高级部署场景，可以使用 `--sglang-config` 指定一个 YAML 文件，来配置服务器组、多模型部署以及选择性权重更新。
+
+**多模型部署**允许同时服务多个模型（例如一个接收权重更新的 actor 模型和一个冻结的 reference/reward 模型）：
+
+```yaml
+sglang:
+  - name: actor
+    update_weights: true          # 接收训练的权重更新（默认）
+    server_groups:
+      - worker_type: regular
+        num_gpus: 8
+        num_gpus_per_engine: 4
+  - name: ref
+    model_path: /path/to/ref_model
+    update_weights: false          # 冻结，不更新权重
+    server_groups:
+      - worker_type: regular
+        num_gpus: 4
+        num_gpus_per_engine: 2
+```
+
+每个模型都有自己独立的 router。每个模型的 router 信息可通过 `args.sglang_model_routers`（一个将模型名映射到 `(ip, port)` 元组的字典）访问。自定义 rollout 函数可以使用 `slime.rollout.sglang_rollout` 中的 `get_model_url(args, "ref")` 来将请求路由到指定模型。
+
+**服务器组功能：**
+- `worker_type`：`regular`、`prefill`、`decode` 或 `placeholder`（预留 GPU 位置但不创建引擎）
+- `overrides`：SGLang `ServerArgs` 字段覆盖字典，会叠加在 `--sglang-*` CLI 参数之上
+- `num_gpus_per_engine`：每组的 TP 大小覆盖
 
 ## megatron 使用方法
 
