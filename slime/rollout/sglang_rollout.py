@@ -22,9 +22,10 @@ from slime.utils.http_utils import get, post
 from slime.utils.misc import SingletonMeta, load_function
 from slime.utils.processing_utils import (
     build_processor_kwargs,
-    encode_image_for_rollout_engine,
     load_processor,
     load_tokenizer,
+    prepare_multimodal_for_rollout,
+    prepare_multimodal_for_training,
 )
 from slime.utils.types import Sample
 
@@ -119,14 +120,9 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    # Lazy-load multimodal inputs to avoid OOM during Dataset init
-    if state.processor and sample.multimodal_inputs is None and sample.raw_prompt is not None:
-        from slime.utils.processing_utils import process_vision_info
-
-        sample.multimodal_inputs = process_vision_info(sample.raw_prompt, state.processor)
-
     if state.processor and sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
-        processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
+        multimodal_inputs = prepare_multimodal_for_training(sample.multimodal_inputs)
+        processor_kwargs = build_processor_kwargs(multimodal_inputs)
         processor_output = state.processor(text=sample.prompt, **processor_kwargs)
         prompt_ids = processor_output["input_ids"][0]
         sample.multimodal_train_inputs = {
@@ -154,10 +150,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 
-    has_multimodal = sample.multimodal_inputs and sample.multimodal_inputs.get("images")
+    has_multimodal = sample.multimodal_inputs and (
+        sample.multimodal_inputs.get("images") or sample.multimodal_inputs.get("videos")
+    )
     if has_multimodal:
-        image_data = sample.multimodal_inputs["images"]
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
+        # Encode images/videos from paths for sglang payload
+        payload.update(prepare_multimodal_for_rollout(sample.multimodal_inputs, colocate=args.colocate))
 
     # Use existing tokens for multi-turn or tokenize the new prompt
     if len(sample.response) > 0:

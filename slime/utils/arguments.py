@@ -1764,3 +1764,7 @@ def slime_validate_args(args):
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    if args.multimodal_keys and "video" in args.multimodal_keys:
+        logger.info("lazy-multimodal-load will be set when video inputs")
+        args.lazy_multimodal_load = True

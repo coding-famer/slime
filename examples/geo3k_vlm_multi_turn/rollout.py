@@ -12,7 +12,11 @@ from examples.geo3k_vlm_multi_turn.base_env import BaseInteractionEnv
 # When executed as a module: python -m examples.vlm_multi_turn.rollout
 from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.http_utils import post
-from slime.utils.processing_utils import encode_image_for_rollout_engine
+from slime.utils.processing_utils import (
+    build_processor_kwargs,
+    encode_image_for_rollout_engine,
+    prepare_multimodal_for_training,
+)
 from slime.utils.types import Sample
 
 DEFAULT_ENV_MODULE = "examples.vlm_multi_turn.env_geo3k"
@@ -152,14 +156,12 @@ def _initialize_resources(args: Any, sample: Sample):
 
 
 def _prepare_initial_inputs(sample: Sample, processor, tokenizer):
-    # Lazy-load multimodal inputs to avoid OOM during Dataset init
-    if processor and sample.multimodal_inputs is None and sample.raw_prompt is not None:
-        from slime.utils.processing_utils import process_vision_info
-
-        sample.multimodal_inputs = process_vision_info(sample.raw_prompt, processor)
-
     if processor:
-        processor_output = processor(text=sample.prompt, **(sample.multimodal_inputs or {}))
+        multimodal_inputs = sample.multimodal_inputs or {}
+        if multimodal_inputs:
+            multimodal_inputs = prepare_multimodal_for_training(multimodal_inputs)
+        processor_kwargs = build_processor_kwargs(multimodal_inputs)
+        processor_output = processor(text=sample.prompt, **processor_kwargs)
         prompt_ids = processor_output["input_ids"][0]
         sample.multimodal_train_inputs = {
             k: v for k, v in processor_output.items() if k not in ["input_ids", "attention_mask"]

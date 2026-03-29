@@ -1,7 +1,7 @@
 import logging
 
 from slime.utils.mask_utils import MultiTurnLossMaskGenerator
-from slime.utils.processing_utils import load_processor, load_tokenizer
+from slime.utils.processing_utils import load_processor, load_tokenizer, prepare_multimodal_for_training
 
 __all__ = ["generate_rollout"]
 
@@ -46,7 +46,27 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
         messages = sample.prompt
         tools = sample.metadata.get("tools", None)
 
-        token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
+        if PROCESSOR and sample.multimodal_inputs:
+            multimodal_inputs = prepare_multimodal_for_training(sample.multimodal_inputs)
+            formatted = TOKENIZER.apply_chat_template(
+                messages,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            processor_output = PROCESSOR(text=formatted, **multimodal_inputs)
+            input_ids = processor_output["input_ids"][0]
+            token_ids, loss_mask = MASK_GENERATOR.get_loss_mask_with_multimodal_alignment(
+                messages,
+                input_ids,
+                tools=tools,
+            )
+            sample.multimodal_train_inputs = {
+                k: v for k, v in processor_output.items() if k not in ["input_ids", "attention_mask"]
+            } or None
+        else:
+            token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
+
         if len(token_ids) != len(loss_mask):
             raise ValueError(
                 f"SFT rollout produced mismatched token_ids/loss_mask lengths: {len(token_ids)=}, {len(loss_mask)=}"

@@ -105,12 +105,11 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
         if multimodal:
-            from slime.utils.processing_utils import process_vision_info
+            from slime.utils.processing_utils import build_processor_kwargs, prepare_multimodal_for_training
 
             for sample in multimodal:
-                vision_prompt = sample.raw_prompt if sample.raw_prompt is not None else sample.prompt
-                multimodal_inputs = process_vision_info(vision_prompt, processor)
-                processor_output = processor(text=sample.prompt, **multimodal_inputs)
+                processor_kwargs = build_processor_kwargs(prepare_multimodal_for_training(sample.multimodal_inputs))
+                processor_output = processor(text=sample.prompt, **processor_kwargs)
                 input_ids = processor_output["input_ids"][0]
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
@@ -239,23 +238,27 @@ class Dataset:
             else:
                 output_prompt = prompt
 
-            if processor and not lazy_multimodal_load:
-                from slime.utils.processing_utils import process_vision_info
-
+            if processor:
                 assert isinstance(
                     prompt, list
                 ), f"prompt must be a list when processor is not None, got {type(prompt)} instead"
-                multimodal_inputs = process_vision_info(prompt, processor)
+                if lazy_multimodal_load:
+                    multimodal_inputs = {}
+                    for type_name, data_key in multimodal_keys.items():
+                        mt = MultimodalTypes.get(type_name)
+                        if mt and data.get(data_key) is not None:
+                            multimodal_inputs[mt.name + "s"] = list(data[data_key])
+                    multimodal_inputs = multimodal_inputs or None
+                else:
+                    from slime.utils.processing_utils import process_vision_info
+
+                    multimodal_inputs = process_vision_info(prompt, processor)
             else:
                 multimodal_inputs = None
-
-            # Store raw conversation prompt for lazy multimodal loading
-            raw_prompt = prompt if processor and lazy_multimodal_load and isinstance(prompt, list) else None
 
             origin_samples.append(
                 Sample(
                     prompt=output_prompt,
-                    raw_prompt=raw_prompt,
                     label=data[label_key] if label_key is not None else None,
                     metadata=metadata,
                     multimodal_inputs=multimodal_inputs,
