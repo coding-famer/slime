@@ -22,6 +22,7 @@ from slime.utils.http_utils import get, post
 from slime.utils.misc import SingletonMeta, load_function
 from slime.utils.processing_utils import (
     build_processor_kwargs,
+    has_multimodal_inputs,
     load_processor,
     load_tokenizer,
     prepare_multimodal_for_rollout,
@@ -151,9 +152,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 
-    has_multimodal = sample.multimodal_inputs and (
-        sample.multimodal_inputs.get("images") or sample.multimodal_inputs.get("videos")
-    )
+    has_multimodal = has_multimodal_inputs(sample.multimodal_inputs)
     if has_multimodal:
         # Encode images/videos from paths for sglang payload
         payload.update(prepare_multimodal_for_rollout(sample.multimodal_inputs, colocate=args.colocate))

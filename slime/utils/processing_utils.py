@@ -23,6 +23,9 @@ VIDEO_MAX_PIXELS = int(os.environ.get("VIDEO_MAX_PIXELS_PER_FRAME", 768 * 28 * 2
 # VIDEO_MAX_PIXELS env var is shared with sglang (controls total pixel budget)
 VIDEO_TOTAL_PIXELS = int(float(os.environ.get("VIDEO_MAX_PIXELS", 128000 * 28 * 28 * 0.9)))
 
+# Audio preprocessing — aligned with sglang load_audio defaults
+AUDIO_SAMPLE_RATE = int(os.environ.get("AUDIO_SAMPLE_RATE", 16000))
+
 # Default image patch size for vision-language models
 # Note: Qwen3-VL uses 16, Qwen2.5-VL uses 14
 # Reference: https://github.com/QwenLM/Qwen3-VL/blob/main/qwen-vl-utils/README.md
@@ -31,6 +34,14 @@ DEFAULT_PATCH_SIZE = 14
 
 def load_tokenizer(name_or_path: str, **kwargs):
     return AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+
+
+def has_multimodal_inputs(multimodal_inputs: dict | None) -> bool:
+    """Check if multimodal_inputs contains any non-empty modality data."""
+    return bool(
+        multimodal_inputs
+        and (multimodal_inputs.get("images") or multimodal_inputs.get("videos") or multimodal_inputs.get("audios"))
+    )
 
 
 def build_processor_kwargs(multimodal_inputs: dict | None = None) -> dict:
@@ -144,12 +155,41 @@ def _extract_images_from_messages(messages):
     return images
 
 
-def process_vision_info(prompt, processor):
-    """Extract PIL images (and videos) from the message list for training.
+def _extract_audios_from_messages(messages):
+    """Extract audio source strings from chat messages containing audio content."""
+    audios = []
+    for msg in messages:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "audio":
+                continue
+            audio_data = item.get("audio")
+            if audio_data is not None:
+                audios.append(audio_data)
+    return audios or None
 
-    Tries qwen_vl_utils first (Qwen VL family), falls back to generic
-    extraction for other models (e.g. GLM-4.6V).
+
+def process_vision_info(prompt, processor):
+    """Extract images, videos, and audios from the message list for training.
+
+    When audio content is present, uses qwen_omni_utils (handles all modalities).
+    Otherwise uses qwen_vl_utils (images+videos only), with generic fallback.
     """
+    has_audio = bool(_extract_audios_from_messages(prompt))
+
+    if has_audio:
+        try:
+            from qwen_omni_utils import process_mm_info
+
+            audios, images, videos = process_mm_info(prompt, use_audio_in_video=False)
+            return {"images": images, "videos": videos, "audios": audios}
+        except ImportError as e:
+            raise ImportError(
+                "qwen_omni_utils is required for non-lazy audio processing: pip install qwen-omni-utils"
+            ) from e
+
     try:
         from qwen_vl_utils import process_vision_info as qwen_process_vision_info
 
@@ -188,8 +228,50 @@ def load_image(source) -> Image.Image:
     raise ValueError(f"Unsupported image source type: {type(source)}")
 
 
+def load_audio(source: str, sr: int = AUDIO_SAMPLE_RATE):
+    """Load audio from path/URL/base64, resample to *sr* Hz, convert to mono.
+
+    Aligned with sglang ``load_audio`` — uses soundfile + scipy.signal.resample.
+    Returns a 1-D float32 numpy array.
+    """
+    import numpy as np
+
+    try:
+        import soundfile as sf
+    except ImportError as e:
+        raise ImportError("soundfile is required for audio preprocessing: pip install soundfile") from e
+
+    def _read(file_like):
+        audio, original_sr = sf.read(file_like, dtype="float32")
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        if original_sr != sr:
+            from scipy.signal import resample as scipy_resample
+
+            num_samples = int(len(audio) * float(sr) / original_sr)
+            audio = scipy_resample(audio, num_samples).astype(np.float32)
+        return audio
+
+    if isinstance(source, str):
+        if source.startswith("data:"):
+            _, encoded = source.split(",", 1)
+            return _read(io.BytesIO(base64.b64decode(encoded)))
+        if source.startswith(("http://", "https://")):
+            import requests
+
+            return _read(io.BytesIO(requests.get(source).content))
+        if os.path.isfile(source):
+            return _read(source)
+        try:
+            raw = base64.b64decode(source)
+            return _read(io.BytesIO(raw))
+        except Exception as e:
+            raise ValueError(f"Cannot load audio from: {source[:100]}...") from e
+    raise ValueError(f"Unsupported audio source type: {type(source)}")
+
+
 def prepare_multimodal_for_training(multimodal_inputs: dict) -> dict:
-    """Resolve path-based multimodal_inputs into loaded PIL Images / video tensors for training."""
+    """Resolve path-based multimodal_inputs into loaded PIL Images / video tensors / audio arrays for training."""
     result = {}
     if multimodal_inputs.get("images"):
         result["images"] = [load_image(img) if isinstance(img, str) else img for img in multimodal_inputs["images"]]
@@ -208,6 +290,8 @@ def prepare_multimodal_for_training(multimodal_inputs: dict) -> dict:
                 "do_sample_frames": False,
                 "video_metadata": metadatas,
             }
+    if multimodal_inputs.get("audios"):
+        result["audios"] = [load_audio(a) if isinstance(a, str) else a for a in multimodal_inputs["audios"]]
     return result
 
 
@@ -353,8 +437,22 @@ def encode_video_for_rollout_engine(video_source: str, colocate: bool = True) ->
     return base64.b64encode(data).decode("utf-8")
 
 
+def encode_audio_for_rollout_engine(audio_source: str, colocate: bool = True) -> str:
+    """Encode audio for sglang audio_data. Returns path directly when colocated."""
+    if colocate:
+        return audio_source
+    if audio_source.startswith(("http://", "https://")):
+        import requests
+
+        data = requests.get(audio_source).content
+    else:
+        with open(audio_source, "rb") as f:
+            data = f.read()
+    return f"data:audio/wav;base64,{base64.b64encode(data).decode('utf-8')}"
+
+
 def prepare_multimodal_for_rollout(multimodal_inputs: dict | None, colocate: bool = True) -> dict:
-    """Build sglang payload fields (image_data, video_data) from multimodal_inputs."""
+    """Build sglang payload fields (image_data, video_data, audio_data) from multimodal_inputs."""
     result = {}
     if not multimodal_inputs:
         return result
@@ -363,5 +461,9 @@ def prepare_multimodal_for_rollout(multimodal_inputs: dict | None, colocate: boo
     if multimodal_inputs.get("videos"):
         result["video_data"] = [
             encode_video_for_rollout_engine(video, colocate=colocate) for video in multimodal_inputs["videos"]
+        ]
+    if multimodal_inputs.get("audios"):
+        result["audio_data"] = [
+            encode_audio_for_rollout_engine(audio, colocate=colocate) for audio in multimodal_inputs["audios"]
         ]
     return result

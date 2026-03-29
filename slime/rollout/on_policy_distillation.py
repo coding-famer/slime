@@ -1,7 +1,7 @@
 import aiohttp
 import torch
 
-from slime.utils.processing_utils import prepare_multimodal_for_rollout
+from slime.utils.processing_utils import has_multimodal_inputs, prepare_multimodal_for_rollout
 from slime.utils.types import Sample
 
 
@@ -18,7 +18,7 @@ async def reward_func(args, sample, **kwargs):
         "logprob_start_len": 0,
     }
 
-    if sample.multimodal_inputs and (sample.multimodal_inputs.get("images") or sample.multimodal_inputs.get("videos")):
+    if has_multimodal_inputs(sample.multimodal_inputs):
         payload.update(prepare_multimodal_for_rollout(sample.multimodal_inputs, colocate=args.colocate))
 
     session_kwargs = {}
