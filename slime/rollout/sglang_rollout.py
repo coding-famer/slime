@@ -124,8 +124,8 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     if state.processor and sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
         multimodal_inputs = prepare_multimodal_for_training(sample.multimodal_inputs)
-        processor_kwargs = build_processor_kwargs(multimodal_inputs)
-        processor_output = state.processor(text=sample.prompt, **processor_kwargs)
+        processor_input = build_processor_kwargs(multimodal_inputs)
+        processor_output = state.processor(text=sample.prompt, **processor_input)
         prompt_ids = processor_output["input_ids"][0]
         sample.multimodal_train_inputs = {
             k: v for k, v in processor_output.items() if k not in ["input_ids", "attention_mask"]

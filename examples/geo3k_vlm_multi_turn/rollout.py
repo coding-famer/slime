@@ -160,8 +160,8 @@ def _prepare_initial_inputs(sample: Sample, processor, tokenizer):
         multimodal_inputs = sample.multimodal_inputs or {}
         if multimodal_inputs:
             multimodal_inputs = prepare_multimodal_for_training(multimodal_inputs)
-        processor_kwargs = build_processor_kwargs(multimodal_inputs)
-        processor_output = processor(text=sample.prompt, **processor_kwargs)
+        processor_input = build_processor_kwargs(multimodal_inputs)
+        processor_output = processor(text=sample.prompt, **processor_input)
         prompt_ids = processor_output["input_ids"][0]
         sample.multimodal_train_inputs = {
             k: v for k, v in processor_output.items() if k not in ["input_ids", "attention_mask"]

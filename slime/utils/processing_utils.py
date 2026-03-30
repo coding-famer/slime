@@ -437,18 +437,32 @@ def encode_video_for_rollout_engine(video_source: str, colocate: bool = True) ->
     return base64.b64encode(data).decode("utf-8")
 
 
-def encode_audio_for_rollout_engine(audio_source: str, colocate: bool = True) -> str:
-    """Encode audio for sglang audio_data. Returns path directly when colocated."""
-    if colocate:
-        return audio_source
-    if audio_source.startswith(("http://", "https://")):
-        import requests
+def encode_audio_for_rollout_engine(audio_source, colocate: bool = True) -> str:
+    """Encode audio for sglang audio_data. Accepts path string or numpy array."""
+    import numpy as np
 
-        data = requests.get(audio_source).content
-    else:
-        with open(audio_source, "rb") as f:
-            data = f.read()
-    return f"data:audio/wav;base64,{base64.b64encode(data).decode('utf-8')}"
+    if isinstance(audio_source, str):
+        if colocate:
+            return audio_source
+        if audio_source.startswith("data:"):
+            return audio_source
+        if audio_source.startswith(("http://", "https://")):
+            import requests
+
+            data = requests.get(audio_source).content
+        else:
+            with open(audio_source, "rb") as f:
+                data = f.read()
+        return f"data:audio/wav;base64,{base64.b64encode(data).decode('utf-8')}"
+
+    if isinstance(audio_source, np.ndarray):
+        import soundfile as sf
+
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_source, AUDIO_SAMPLE_RATE, format="WAV")
+        return f"data:audio/wav;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
+
+    raise ValueError(f"Unsupported audio source type: {type(audio_source)}")
 
 
 def prepare_multimodal_for_rollout(multimodal_inputs: dict | None, colocate: bool = True) -> dict:

@@ -108,8 +108,8 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
             from slime.utils.processing_utils import build_processor_kwargs, prepare_multimodal_for_training
 
             for sample in multimodal:
-                processor_kwargs = build_processor_kwargs(prepare_multimodal_for_training(sample.multimodal_inputs))
-                processor_output = processor(text=sample.prompt, **processor_kwargs)
+                processor_input = build_processor_kwargs(prepare_multimodal_for_training(sample.multimodal_inputs))
+                processor_output = processor(text=sample.prompt, **processor_input)
                 input_ids = processor_output["input_ids"][0]
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
@@ -127,6 +127,10 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
     return filtered_samples
 
 
+# TODO: _build_messages embeds multimodal paths into message content dicts, then process_vision_info
+# extracts them back out. When multimodal_keys is set, we could pass paths directly to
+# multimodal_inputs without the round-trip through messages. This would eliminate the need for
+# _extract_*_from_messages helpers and the qwen_vl_utils/qwen_omni_utils dependency in the non-lazy path.
 def _build_messages(data: dict, prompt_key: str, as_conversation: bool, multimodal_keys: dict = None):
     prompt = data.get(prompt_key)
 
