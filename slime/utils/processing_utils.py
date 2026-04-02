@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
@@ -234,7 +235,6 @@ def load_audio(source: str, sr: int = AUDIO_SAMPLE_RATE):
     Aligned with sglang ``load_audio`` — uses soundfile + scipy.signal.resample.
     Returns a 1-D float32 numpy array.
     """
-    import numpy as np
 
     try:
         import soundfile as sf
@@ -367,7 +367,7 @@ def preprocess_video(
         (video_tensor, video_metadata) where video_tensor is shape (T, C, H, W)
         uint8 and video_metadata is a dict for the HF processor.
     """
-    import numpy as np
+
     import torch
     import torchvision.transforms.functional as F
     from torchvision.transforms import InterpolationMode
@@ -439,7 +439,6 @@ def encode_video_for_rollout_engine(video_source: str, colocate: bool = True) ->
 
 def encode_audio_for_rollout_engine(audio_source, colocate: bool = True) -> str:
     """Encode audio for sglang audio_data. Accepts path string or numpy array."""
-    import numpy as np
 
     if isinstance(audio_source, str):
         if colocate:

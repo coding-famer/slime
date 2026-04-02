@@ -1,7 +1,12 @@
 import logging
 
 from slime.utils.mask_utils import MultiTurnLossMaskGenerator
-from slime.utils.processing_utils import load_processor, load_tokenizer, prepare_multimodal_for_training
+from slime.utils.processing_utils import (
+    build_processor_kwargs,
+    load_processor,
+    load_tokenizer,
+    prepare_multimodal_for_training,
+)
 
 __all__ = ["generate_rollout"]
 
@@ -54,7 +59,8 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
                 tokenize=False,
                 add_generation_prompt=False,
             )
-            processor_output = PROCESSOR(text=formatted, **multimodal_inputs)
+            processor_input = build_processor_kwargs(multimodal_inputs)
+            processor_output = PROCESSOR(text=formatted, **processor_input)
             input_ids = processor_output["input_ids"][0]
             token_ids, loss_mask = MASK_GENERATOR.get_loss_mask_with_multimodal_alignment(
                 messages,
