@@ -740,6 +740,9 @@ class RolloutManager:
         if any(sample.multimodal_train_inputs is not None for sample in samples):
             train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
 
+        if self.args.lazy_multimodal_train and any(sample.multimodal_inputs is not None for sample in samples):
+            train_data["multimodal_inputs"] = [sample.multimodal_inputs for sample in samples]
+
         if samples[0].teacher_log_probs is not None:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
@@ -772,6 +775,7 @@ class RolloutManager:
             for key in [
                 "tokens",
                 "multimodal_train_inputs",
+                "multimodal_inputs",
                 "response_lengths",
                 "rewards",
                 "truncated",

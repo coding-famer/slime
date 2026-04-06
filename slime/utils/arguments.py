@@ -562,6 +562,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help="Defer image decoding to rollout time instead of loading all images at Dataset init. Reduces memory usage for large VLM datasets.",
             )
+            parser.add_argument(
+                "--lazy-multimodal-train",
+                action="store_true",
+                default=False,
+                help="Defer multimodal tensor computation to train side per micro-batch instead of computing at rollout and transferring via ray. Reduces OOM risk for video workloads.",
+            )
             parser.add_argument("--metadata-key", type=str, default="metadata", help="JSON dataset key")
             parser.add_argument(
                 "--tool-key",

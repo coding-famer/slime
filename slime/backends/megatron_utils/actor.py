@@ -71,6 +71,10 @@ class MegatronTrainRayActor(TrainRayActor):
             if i == dist.get_rank() % args.num_gpus_per_node:
                 self.hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
                 self.tokenizer = AutoTokenizer.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
+                if args.lazy_multimodal_train:
+                    from slime.utils.processing_utils import load_processor
+
+                    args._mm_processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
         self.train_parallel_config = {
@@ -201,6 +205,31 @@ class MegatronTrainRayActor(TrainRayActor):
         rollout_data["loss_masks"] = [
             torch.tensor(t, dtype=torch.int, device=torch.cuda.current_device()) for t in rollout_data["loss_masks"]
         ]
+        if "multimodal_inputs" in rollout_data:
+            from slime.utils.processing_utils import build_processor_kwargs, prepare_multimodal_for_training
+
+            processor = self.args._mm_processor
+            mm_train_inputs = []
+            for mm_paths in rollout_data["multimodal_inputs"]:
+                if mm_paths is None:
+                    mm_train_inputs.append(None)
+                    continue
+                multimodal_inputs = prepare_multimodal_for_training(mm_paths)
+                processor_input = build_processor_kwargs(multimodal_inputs)
+                processor_output = processor(text="", **processor_input)
+                mm_dict = {
+                    k: (
+                        torch.from_numpy(v.copy()).to(device=torch.cuda.current_device())
+                        if isinstance(v, np.ndarray)
+                        else v.to(device=torch.cuda.current_device())
+                    )
+                    for k, v in processor_output.items()
+                    if k not in ("input_ids", "attention_mask")
+                }
+                mm_train_inputs.append(mm_dict or None)
+            rollout_data["multimodal_train_inputs"] = mm_train_inputs
+            del rollout_data["multimodal_inputs"]
+
         if "multimodal_train_inputs" in rollout_data:
             # Move multimodal training tensors to GPU in advance
             rollout_data["multimodal_train_inputs"] = [
